@@ -3,3 +3,4 @@ ch*/
 .venv/
 .playwright_profile/
 .lingma/
+__pycache__/
