@@ -1,0 +1,5 @@
+ch*/
+*_downloads/
+.venv/
+.playwright_profile/
+.lingma/
