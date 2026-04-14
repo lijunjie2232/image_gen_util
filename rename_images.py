@@ -5,7 +5,7 @@ import sys
 import argparse
 
 
-def rename_images_in_directory(directory_path, force=False):
+def rename_images_in_directory(directory_path, force=False, recursive=False):
     """重命名指定目录中的所有图片文件"""
     if not os.path.exists(directory_path):
         print(f"Error: Directory '{directory_path}' does not exist")
@@ -16,12 +16,22 @@ def rename_images_in_directory(directory_path, force=False):
     
     # 获取所有图片文件
     image_files = []
-    for filename in os.listdir(directory_path):
-        file_path = os.path.join(directory_path, filename)
-        if os.path.isfile(file_path):
-            ext = os.path.splitext(filename)[1].lower()
-            if ext in supported_extensions:
-                image_files.append(file_path)
+    if recursive:
+        # 递归遍历所有子目录
+        for root, dirs, files in os.walk(directory_path):
+            for filename in files:
+                file_path = os.path.join(root, filename)
+                ext = os.path.splitext(filename)[1].lower()
+                if ext in supported_extensions:
+                    image_files.append(file_path)
+    else:
+        # 仅处理当前目录
+        for filename in os.listdir(directory_path):
+            file_path = os.path.join(directory_path, filename)
+            if os.path.isfile(file_path):
+                ext = os.path.splitext(filename)[1].lower()
+                if ext in supported_extensions:
+                    image_files.append(file_path)
     
     if not image_files:
         print(f"No image files found in '{directory_path}'")
@@ -35,6 +45,7 @@ def rename_images_in_directory(directory_path, force=False):
     
     for i, file_path in enumerate(image_files, 1):
         filename = os.path.basename(file_path)
+        file_dir = os.path.dirname(file_path)
         print(f"[{i}/{len(image_files)}] Processing: {filename}")
         
         try:
@@ -57,7 +68,7 @@ def rename_images_in_directory(directory_path, force=False):
             
             # 生成新文件名: {hashsum}_{width}x{height}.{suffix}
             new_filename = f"{hash_sum}_{actual_width}x{actual_height}.{suffix}"
-            new_path = os.path.join(directory_path, new_filename)
+            new_path = os.path.join(file_dir, new_filename)
             
             # 检查是否需要重命名
             if file_path == new_path:
@@ -104,6 +115,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Rename image files in a directory')
     parser.add_argument('directory_path', help='Path to the directory containing images')
     parser.add_argument('-f', '--force', action='store_true', help='Force override existing files')
+    parser.add_argument('-r', '--recursive', action='store_true', help='Recursively process subdirectories')
     
     args = parser.parse_args()
-    rename_images_in_directory(args.directory_path, force=args.force)
+    rename_images_in_directory(args.directory_path, force=args.force, recursive=args.recursive)
