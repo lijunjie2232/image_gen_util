@@ -4,3 +4,4 @@ ch*/
 .playwright_profile/
 .lingma/
 __pycache__/
+*.tar.*
