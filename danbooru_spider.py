@@ -150,7 +150,7 @@ def download_worker(worker_id):
     # Create a persistent httpx client for this worker with HTTP/2 support
     client = httpx.Client(
         headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "User-Agent": "curl/8.19.0",
             "Accept": "*/*",
         },
         timeout=30.0,
