@@ -82,6 +82,15 @@ def add_existing_urls_to_queue():
     )
 
 
+def get_failed_posts():
+    """Get list of failed posts from JSON file"""
+    failed_posts = []
+    for post_id, post_info in posts_data.items():
+        if isinstance(post_info, dict) and post_info.get("type") == "failed":
+            failed_posts.append(post_id)
+    return failed_posts
+
+
 def save_data():
     """Save posts data to JSON file (thread-safe)"""
     with data_lock:
@@ -459,11 +468,13 @@ def run_page_sync(page_number, tags):
     asyncio.run(process_page(page_number, tags))
 
 
-async def main():
+async def main(refetch=False):
     tags = "shirakami_fubuki+solo"
 
     logger.info("=" * 80)
     logger.info("Danbooru Spider Starting")
+    if refetch:
+        logger.info("Mode: REFETCH (re-processing failed posts)")
     logger.info("=" * 80)
 
     # Create download directory
@@ -493,6 +504,163 @@ async def main():
     # Add existing URLs to download queue (workers will skip if file exists)
     logger.info("\nInitializing download queue with existing URLs from JSON file...")
     add_existing_urls_to_queue()
+    
+    # If refetch mode, re-process failed posts
+    if refetch:
+        failed_posts = get_failed_posts()
+        logger.info(f"\nRefetch mode: Found {len(failed_posts)} failed posts to re-process")
+        
+        if failed_posts:
+            # Start a browser context for refetching
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(headless=False)
+                context = await browser.new_context()
+                page = await context.new_page()
+                
+                refetch_success = 0
+                refetch_failed = 0
+                
+                for idx, post_id in enumerate(failed_posts, 1):
+                    logger.info(f"\n[Refetch {idx}/{len(failed_posts)}] Processing: {post_id}")
+                    
+                    # Extract post number
+                    post_number = post_id.replace("post_", "")
+                    detail_url = f"https://danbooru.donmai.us/posts/{post_number}"
+                    
+                    detail_page = await context.new_page()
+                    
+                    try:
+                        await detail_page.goto(detail_url, timeout=10000)
+                        
+                        original_url = None
+                        url_type = None
+                        tags_data = None
+                        
+                        # Try method 1: Get from og:image:secure_url meta tag
+                        og_image = await detail_page.query_selector(
+                            'meta[property="og:image:secure_url"]'
+                        )
+                        if not og_image:
+                            og_image = await detail_page.query_selector(
+                                'meta[property="og:image"]'
+                            )
+                        
+                        if og_image:
+                            original_url = await og_image.get_attribute("content")
+                            if original_url:
+                                url_type = "og_meta"
+                        
+                        # Try method 2: Get from original link
+                        if not original_url:
+                            original_link = await detail_page.query_selector(
+                                "a.image-view-original-link"
+                            )
+                            if original_link:
+                                original_url = await original_link.get_attribute("href")
+                                if original_url:
+                                    url_type = "original_link"
+                        
+                        # Try method 3: Get from #image img tag
+                        if not original_url:
+                            image_container = await detail_page.query_selector("#image")
+                            if image_container:
+                                tag_name = await image_container.evaluate("el => el.tagName")
+                                if tag_name.lower() == "img":
+                                    original_url = await image_container.get_attribute("src")
+                                    if original_url:
+                                        url_type = "img_src"
+                                else:
+                                    img_tag = await image_container.query_selector("img")
+                                    if img_tag:
+                                        original_url = await img_tag.get_attribute("src")
+                                        if original_url:
+                                            url_type = "img_src"
+                        
+                        # Extract tags if we got a URL
+                        if original_url:
+                            try:
+                                tag_list = await detail_page.query_selector("#tag-list > div")
+                                if tag_list:
+                                    tags_data = await tag_list.evaluate("""
+                                        (el) => {
+                                            const data = {
+                                                artists: [],
+                                                copyrights: [],
+                                                characters: [],
+                                                general: []
+                                            };
+                                            
+                                            const artistList = el.querySelector('ul.artist-tag-list');
+                                            if (artistList) {
+                                                data.artists = Array.from(artistList.querySelectorAll('li')).map(li => {
+                                                    const link = li.querySelector('a.search-tag');
+                                                    return link ? link.textContent.trim() : '';
+                                                }).filter(t => t);
+                                            }
+                                            
+                                            const copyrightList = el.querySelector('ul.copyright-tag-list');
+                                            if (copyrightList) {
+                                                data.copyrights = Array.from(copyrightList.querySelectorAll('li')).map(li => {
+                                                    const link = li.querySelector('a.search-tag');
+                                                    return link ? link.textContent.trim() : '';
+                                                }).filter(t => t);
+                                            }
+                                            
+                                            const characterList = el.querySelector('ul.character-tag-list');
+                                            if (characterList) {
+                                                data.characters = Array.from(characterList.querySelectorAll('li')).map(li => {
+                                                    const link = li.querySelector('a.search-tag');
+                                                    return link ? link.textContent.trim() : '';
+                                                }).filter(t => t);
+                                            }
+                                            
+                                            const generalList = el.querySelector('ul.general-tag-list');
+                                            if (generalList) {
+                                                data.general = Array.from(generalList.querySelectorAll('li')).map(li => {
+                                                    const link = li.querySelector('a.search-tag');
+                                                    return link ? link.textContent.trim() : '';
+                                                }).filter(t => t);
+                                            }
+                                            
+                                            return data;
+                                        }
+                                    """)
+                            except Exception as e:
+                                logger.warning(f"Could not extract tags: {e}")
+                        
+                        # Update the post data
+                        if original_url and url_type:
+                            # Remove old failed entry and add new successful one
+                            with data_lock:
+                                if post_id in posts_data:
+                                    del posts_data[post_id]
+                            
+                            if add_post(post_id, original_url, url_type, tags_data):
+                                # Add to download queue
+                                download_queue.put((post_id, original_url))
+                                refetch_success += 1
+                                logger.success(f"[Refetch] Successfully re-processed: {post_id}")
+                            else:
+                                refetch_failed += 1
+                                logger.warning(f"[Refetch] Post already exists: {post_id}")
+                        else:
+                            refetch_failed += 1
+                            logger.warning(f"[Refetch] Still no URL found for: {post_id}")
+                    
+                    except Exception as e:
+                        refetch_failed += 1
+                        logger.error(f"[Refetch] Error processing {post_id}: {e}")
+                    finally:
+                        await detail_page.close()
+                    
+                    # Save progress periodically
+                    if idx % 10 == 0 or idx == len(failed_posts):
+                        save_data()
+                
+                await browser.close()
+                
+                logger.info(f"\nRefetch complete: Success={refetch_success}, Failed={refetch_failed}")
+                logger.info("Download workers will process the re-fetched URLs")
 
     # Create page numbers to process (skip finished pages)
     page_numbers = [p for p in range(1, TOTAL_PAGES + 1) if p not in finished_pages]
@@ -539,4 +707,10 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    # Parse command line arguments
+    refetch_mode = "--refetch" in sys.argv
+    
+    if refetch_mode:
+        logger.info("Running in REFETCH mode")
+    
+    asyncio.run(main(refetch=refetch_mode))
