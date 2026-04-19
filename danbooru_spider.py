@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import queue
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -285,30 +286,59 @@ async def process_page(page_number, tags):
                     url_type = None
                     tags_data = None
 
-                    # Try method 1: Get from original link
-                    original_link = await detail_page.query_selector(
-                        "a.image-view-original-link"
+                    # Try method 1: Get from og:image:secure_url meta tag (most reliable)
+                    og_image = await detail_page.query_selector(
+                        'meta[property="og:image:secure_url"]'
                     )
-                    if original_link:
-                        original_url = await original_link.get_attribute("href")
+                    if not og_image:
+                        og_image = await detail_page.query_selector(
+                            'meta[property="og:image"]'
+                        )
+                    
+                    if og_image:
+                        original_url = await og_image.get_attribute("content")
                         if original_url:
-                            url_type = "original_link"
+                            url_type = "og_meta"
                             logger.debug(
-                                f"[Page {page_number}] Got URL from original_link"
+                                f"[Page {page_number}] Got URL from og:image meta tag"
                             )
 
-                    # Try method 2: If no original link, get from #image img tag
+                    # Try method 2: Get from original link
+                    if not original_url:
+                        original_link = await detail_page.query_selector(
+                            "a.image-view-original-link"
+                        )
+                        if original_link:
+                            original_url = await original_link.get_attribute("href")
+                            if original_url:
+                                url_type = "original_link"
+                                logger.debug(
+                                    f"[Page {page_number}] Got URL from original_link"
+                                )
+
+                    # Try method 3: If no original link, get from #image img tag
                     if not original_url:
                         image_container = await detail_page.query_selector("#image")
                         if image_container:
-                            img_tag = await image_container.query_selector("img")
-                            if img_tag:
-                                original_url = await img_tag.get_attribute("src")
+                            # Check if it's directly an img tag
+                            tag_name = await image_container.evaluate("el => el.tagName")
+                            if tag_name.lower() == "img":
+                                original_url = await image_container.get_attribute("src")
                                 if original_url:
                                     url_type = "img_src"
                                     logger.debug(
-                                        f"[Page {page_number}] Got URL from img_src"
+                                        f"[Page {page_number}] Got URL from #image img tag (direct)"
                                     )
+                            else:
+                                # It contains an img tag
+                                img_tag = await image_container.query_selector("img")
+                                if img_tag:
+                                    original_url = await img_tag.get_attribute("src")
+                                    if original_url:
+                                        url_type = "img_src"
+                                        logger.debug(
+                                            f"[Page {page_number}] Got URL from #image img tag (inside)"
+                                        )
 
                     # Extract tags information from #tag-list
                     if original_url:
